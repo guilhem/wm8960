@@ -1,6 +1,8 @@
 [Unit]
 Description=Tagtagtag Sound Mixer Daemon
 StartLimitIntervalSec=0
+BindsTo=dev-input-tagtagtag\x2dvolume.device
+After=dev-input-tagtagtag\x2dvolume.device
 
 [Service]
 Type=forking

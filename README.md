@@ -13,8 +13,11 @@ Compared to upstream, the codec driver configures clocking in slave mode and mad
 
 MAX9759 codec has been patched to make gain GPIOs optional.
 
-Volume button is handled by an additional driver exposing GPIOs as ALSA switches.
-Line-out and volume button are handled by a separate daemon that modifies sound volumes.
+The physical volume contacts use the upstream `gpio-keys` driver and evdev
+(`CONFIG_KEYBOARD_GPIO` and `CONFIG_INPUT_EVDEV` must be enabled). The udev rule
+installed with the driver creates `/dev/input/tagtagtag-volume` and starts
+`tagtagtag-mixerd` when the input device appears. The daemon reads both contacts
+and adjusts the existing ALSA controls, including line-out routing.
 
 ## Datasheets
 
@@ -27,11 +30,11 @@ Sound card schematics will be published on https://github.com/nabaztag2018/hardw
 
 Install requirements
 
-    sudo apt-get install raspberrypi-kernel-headers libasound2-dev
+    sudo apt-get install linux-headers-$(uname -r) libasound2-dev device-tree-compiler
 
 Clone source code.
 
-    git clone -b tagtagtag-sound https://github.com/pguyot/wm8960
+    git clone -b nabos-gpio-keys https://github.com/guilhem/wm8960
 
 Compile and install with
 

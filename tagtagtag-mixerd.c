@@ -13,6 +13,8 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #include <stdarg.h>
+#include <linux/input.h>
+#include <sys/ioctl.h>
 
 #ifdef TEST
 #define DEBUG
@@ -35,6 +37,27 @@
 #define DEFAULT_INPUT1_BASE             3
 #define DEFAULT_CAPTURE_BASE            90
 #define PID_FILE_PATH "/run/tagtagtag-mixerd.pid"
+#define VOLUME_INPUT_PATH "/dev/input/tagtagtag-volume"
+#define KEY_BITS (8 * sizeof(unsigned long))
+#define KEY_WORDS ((KEY_MAX + KEY_BITS) / KEY_BITS)
+
+#ifdef TEST
+static unsigned long test_keys[KEY_WORDS];
+static int test_ioctl_error;
+static int test_snapshots;
+
+static int test_ioctl(int fd, unsigned long request, void *keys) {
+    assert(request == EVIOCGKEY(sizeof(test_keys)));
+    test_snapshots++;
+    if (test_ioctl_error) {
+        errno = EIO;
+        return -1;
+    }
+    memcpy(keys, test_keys, sizeof(test_keys));
+    return sizeof(test_keys);
+}
+#define ioctl test_ioctl
+#endif
 
 struct config {
     int debug;
@@ -77,16 +100,40 @@ static int hctl_jack_cb(snd_hctl_elem_t *elem, unsigned int mask) {
     return 0;
 }
 
-static int hctl_button_cb(snd_hctl_elem_t *elem, unsigned int mask) {
-    int* buttons = snd_hctl_elem_get_callback_private(elem);
-    snd_ctl_elem_value_t *elem_value;
-
-    snd_ctl_elem_value_alloca(&elem_value);
-    snd_hctl_elem_read(elem, elem_value);
-    buttons[0] = snd_ctl_elem_value_get_integer(elem_value, 0);
-    buttons[1] = snd_ctl_elem_value_get_integer(elem_value, 1);
-
+static int read_volume_buttons(int fd, int buttons[2]) {
+    unsigned long keys[KEY_WORDS] = {0};
+    if (ioctl(fd, EVIOCGKEY(sizeof(keys)), keys) < 0)
+        return -1;
+    buttons[0] = !!(keys[BTN_0 / KEY_BITS] & (1UL << (BTN_0 % KEY_BITS)));
+    buttons[1] = !!(keys[BTN_1 / KEY_BITS] & (1UL << (BTN_1 % KEY_BITS)));
     return 0;
+}
+
+static int read_volume_events(int fd, int buttons[2], int *dropped) {
+    struct input_event events[32];
+    int report = 0;
+    ssize_t count;
+    while ((count = read(fd, events, sizeof(events))) != -1) {
+        if (count == 0 || count % sizeof(events[0]) != 0) {
+            errno = EIO;
+            return -1;
+        }
+        for (size_t i = 0; i < (size_t) count / sizeof(events[0]); i++) {
+            if (events[i].type != EV_SYN)
+                continue;
+            if (events[i].code == SYN_DROPPED)
+                *dropped = 1;
+            else if (events[i].code == SYN_REPORT) {
+                *dropped = 0;
+                report = 1;
+            }
+        }
+    }
+    if (errno != EAGAIN && errno != EWOULDBLOCK)
+        return -1;
+    // Events are notifications; sample both contacts together after draining
+    // the queue, including recovery from SYN_DROPPED. Never replay old key bits.
+    return report && !*dropped ? read_volume_buttons(fd, buttons) : 0;
 }
 
 static void default_values(struct config* conf) {
@@ -217,7 +264,7 @@ void teardown_hctl(snd_hctl_t *hctl) {
     snd_hctl_close(hctl);
 }
 
-void setup_callbacks(snd_hctl_t *hctl, int *jack, int *buttons) {
+void setup_callbacks(snd_hctl_t *hctl, int *jack) {
     snd_ctl_elem_id_t *id;
     snd_hctl_elem_t *elem;
 
@@ -232,14 +279,6 @@ void setup_callbacks(snd_hctl_t *hctl, int *jack, int *buttons) {
     // Initial callback to set value.
     hctl_jack_cb(elem, 0);
 
-    snd_ctl_elem_id_set_name(id, "Volume Button");
-    elem = snd_hctl_find_elem(hctl, id);
-    
-    snd_hctl_elem_set_callback(elem, hctl_button_cb);
-    snd_hctl_elem_set_callback_private(elem, buttons);
-
-    // Initial callback to set value.
-    hctl_button_cb(elem, 0);
 }
 
 typedef enum ctl_elem_value_type {
@@ -249,6 +288,17 @@ typedef enum ctl_elem_value_type {
     dual_integer
 } ctl_elem_value_type;
 
+#ifdef TEST
+static int test_volumes[3];
+static int test_writes;
+
+static void set_ctl_elem_value(snd_hctl_t *hctl, const char *name, ctl_elem_value_type val_type, int val) {
+    if (!strcmp(name, "Speaker Playback Volume")) test_volumes[0] = val;
+    if (!strcmp(name, "Headphone Playback Volume")) test_volumes[1] = val;
+    if (!strcmp(name, "Playback Volume")) test_volumes[2] = val;
+    test_writes++;
+}
+#else
 static void set_ctl_elem_value(snd_hctl_t *hctl, const char *name, ctl_elem_value_type val_type, int val) {
     snd_ctl_elem_id_t *id;
     snd_hctl_elem_t *elem;
@@ -281,6 +331,7 @@ static void set_ctl_elem_value(snd_hctl_t *hctl, const char *name, ctl_elem_valu
     }
     snd_hctl_elem_write(elem, elem_value);
 }
+#endif
 
 void set_volumes(int daemon, snd_hctl_t *hctl, struct config* conf, int jack, int buttons[2]) {
     int speaker_volume;
@@ -293,6 +344,11 @@ void set_volumes(int daemon, snd_hctl_t *hctl, struct config* conf, int jack, in
     //    0                1                 max volume     mute
     //    1                0                 medium volume  max volume
     //    1                1                        impossible
+
+    if (buttons[0] == 1 && buttons[1] == 1) {
+        do_log(daemon, conf->debug, "Unexpected button values (both are high)");
+        return;
+    }
 
     if (jack && conf->lineout_mode == LINEOUT_MODE_HEADPHONE) {
         speaker_volume = 0;
@@ -374,6 +430,8 @@ int main(int argc, char** argv) {
     sigset_t sigmask;
     sigset_t zeromask;
     int daemon = 0;
+    int volume_fd;
+    int volume_dropped = 0;
     struct pollfd *fds = (struct pollfd*) malloc(0);
 
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "-d"))) {
@@ -397,7 +455,12 @@ int main(int argc, char** argv) {
     if (err < 0)
         return 1;
 
-    setup_callbacks(hctl, &jack, buttons);
+    volume_fd = open(VOLUME_INPUT_PATH, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (volume_fd < 0 || read_volume_buttons(volume_fd, buttons) < 0) {
+        do_log(daemon, 1, "Cannot read volume input %s (errno=%i)\n", VOLUME_INPUT_PATH, errno);
+        return 1;
+    }
+    setup_callbacks(hctl, &jack);
     
     if (argc == 2 && strcmp(argv[1], "-d") == 0) {
         int pfile_fd;
@@ -445,14 +508,21 @@ int main(int argc, char** argv) {
         set_volumes(daemon, hctl, &priv, jack, buttons);
         
         npolldescs = snd_hctl_poll_descriptors_count(hctl);
-        num_fds = (unsigned) npolldescs;
-        fds = (struct pollfd*) realloc(fds, num_fds * sizeof(struct pollfd));
+        if (npolldescs < 0)
+            return 1;
+        num_fds = (unsigned) npolldescs + 1;
+        struct pollfd *new_fds = realloc(fds, num_fds * sizeof(struct pollfd));
+        if (new_fds == NULL)
+            return 1;
+        fds = new_fds;
         memset(fds, 0, num_fds * sizeof(struct pollfd));
-        err = snd_hctl_poll_descriptors(hctl, fds, num_fds);
+        err = snd_hctl_poll_descriptors(hctl, fds, npolldescs);
         if (err < 0) {
             do_log(daemon, 1, "Unable to get poll descriptors\n");
             return 1;
         }
+        fds[npolldescs].fd = volume_fd;
+        fds[npolldescs].events = POLLIN;
         err = ppoll(fds, num_fds, NULL, &zeromask);
         if (err < 0) {
             if (errno == EINTR) {
@@ -461,13 +531,24 @@ int main(int argc, char** argv) {
                     do_log(daemon, priv.debug, "Got USR1, reloading configuration");
                     load_config(daemon, &priv, CONFIG_FILE_PATH);
                 }
+                continue;
             } else {
                 do_log(daemon, 1, "Error with poll (%i)\n", errno);
                 return 1;
             }
         }
 
-        err = snd_hctl_poll_descriptors_revents(hctl, fds, num_fds, &revents);
+        if (fds[npolldescs].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            do_log(daemon, 1, "Volume input disconnected\n");
+            return 1;
+        }
+        if ((fds[npolldescs].revents & POLLIN) &&
+            read_volume_events(volume_fd, buttons, &volume_dropped) < 0) {
+            do_log(daemon, 1, "Cannot read volume input events (errno=%i)\n", errno);
+            return 1;
+        }
+
+        err = snd_hctl_poll_descriptors_revents(hctl, fds, npolldescs, &revents);
         if (err < 0) {
             do_log(daemon, 1, "Unable to get poll revents\n");
             return 1;
@@ -484,6 +565,81 @@ int main(int argc, char** argv) {
 }
 
 #else
+
+static void test_volume_input(void) {
+    int buttons[2] = {1, 1};
+    int dropped = 0;
+    int pipe_fds[2];
+    struct input_event events[] = {
+        {.type = EV_KEY, .code = BTN_0, .value = 1},
+        {.type = EV_KEY, .code = BTN_1, .value = 0},
+        {.type = EV_SYN, .code = SYN_REPORT},
+    };
+
+    test_ioctl_error = 1;
+    assert(read_volume_buttons(-1, buttons) == -1);
+    assert(buttons[0] == 1 && buttons[1] == 1);
+    test_ioctl_error = 0;
+    assert(read_volume_buttons(-1, buttons) == 0);
+    assert(buttons[0] == 0 && buttons[1] == 0);
+
+    assert(pipe2(pipe_fds, O_NONBLOCK | O_CLOEXEC) == 0);
+    test_snapshots = 0;
+    // The kernel state is newer than the events already read into memory.
+    test_keys[BTN_1 / KEY_BITS] = 1UL << (BTN_1 % KEY_BITS);
+    assert(write(pipe_fds[1], events, sizeof(events)) == sizeof(events));
+    assert(read_volume_events(pipe_fds[0], buttons, &dropped) == 0);
+    assert(buttons[0] == 0 && buttons[1] == 1 && test_snapshots == 1);
+
+    events[0] = (struct input_event) {.type = EV_SYN, .code = SYN_DROPPED};
+    assert(write(pipe_fds[1], events, sizeof(events[0])) == sizeof(events[0]));
+    assert(read_volume_events(pipe_fds[0], buttons, &dropped) == 0);
+    assert(dropped == 1 && test_snapshots == 1);
+    test_keys[BTN_0 / KEY_BITS] = 1UL << (BTN_0 % KEY_BITS);
+    assert(write(pipe_fds[1], &events[2], sizeof(events[2])) == sizeof(events[2]));
+    assert(read_volume_events(pipe_fds[0], buttons, &dropped) == 0);
+    assert(dropped == 0 && buttons[0] == 1 && buttons[1] == 0 && test_snapshots == 2);
+
+    test_ioctl_error = 1;
+    assert(write(pipe_fds[1], &events[2], sizeof(events[2])) == sizeof(events[2]));
+    assert(read_volume_events(pipe_fds[0], buttons, &dropped) == -1);
+    assert(buttons[0] == 1 && buttons[1] == 0);
+    test_ioctl_error = 0;
+    assert(write(pipe_fds[1], "x", 1) == 1);
+    assert(read_volume_events(pipe_fds[0], buttons, &dropped) == -1);
+    close(pipe_fds[1]);
+    assert(read_volume_events(pipe_fds[0], buttons, &dropped) == -1);
+    close(pipe_fds[0]);
+}
+
+static void test_volume_mapping(struct config *conf) {
+    const int states[][2] = {{0, 0}, {0, 1}, {1, 0}, {1, 1}};
+    const int speaker[] = {0, conf->tag_speaker_high, conf->tag_speaker_low};
+    const int headphone[] = {conf->tagtag_speaker_low, 0, conf->tagtag_speaker_high};
+    const int playback[] = {conf->headphone_low, 0, conf->headphone_high};
+    for (int mode = LINEOUT_MODE_LINEOUT; mode <= LINEOUT_MODE_HEADPHONE; mode++) {
+        conf->lineout_mode = mode;
+        for (int jack = 0; jack <= 1; jack++) {
+            for (int state = 0; state < 4; state++) {
+                int buttons[2] = {states[state][0], states[state][1]};
+                test_writes = 0;
+                set_volumes(0, NULL, conf, jack, buttons);
+                if (state == 3) {
+                    assert(test_writes == 0);
+                } else if (jack && mode == LINEOUT_MODE_HEADPHONE) {
+                    assert(test_writes > 0);
+                    assert(test_volumes[0] == 0 && test_volumes[1] == 0);
+                    assert(test_volumes[2] == playback[state]);
+                } else {
+                    assert(test_writes > 0);
+                    assert(test_volumes[0] == speaker[state]);
+                    assert(test_volumes[1] == headphone[state]);
+                    assert(test_volumes[2] == conf->speaker_base);
+                }
+            }
+        }
+    }
+}
 
 int main(int argc, char** argv) {
     struct config default_conf;
@@ -513,6 +669,9 @@ int main(int argc, char** argv) {
     assert(loaded_conf.input1_base == DEFAULT_INPUT1_BASE);
     assert(default_conf.capture_base == DEFAULT_CAPTURE_BASE);
     assert(loaded_conf.capture_base == DEFAULT_CAPTURE_BASE);
+
+    test_volume_input();
+    test_volume_mapping(&default_conf);
 
     return 0;
 }

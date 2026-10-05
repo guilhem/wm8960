@@ -1,0 +1,2 @@
+# Name the two volume contacts independently of input event numbering.
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="tagtagtag-volume", SYMLINK+="input/tagtagtag-volume", TAG+="systemd", ENV{SYSTEMD_ALIAS}="/dev/input/tagtagtag-volume", ENV{SYSTEMD_WANTS}+="tagtagtag-mixerd.service"

@@ -5,19 +5,6 @@ snd-soc-wm8960-objs := wm8960.o
 obj-m += snd-soc-wm8960.o
 snd-soc-max9759-objs := max9759.o
 obj-m += snd-soc-max9759.o
-snd-soc-volume-gpio-objs := volume-gpio.o
-obj-m += snd-soc-volume-gpio.o
-dtbo-y += tagtagtag-sound.dtbo
-
-targets += $(dtbo-y)
-
-# Gracefully supporting the new always-y without cutting off older target with kernel 4.x
-ifeq ($(firstword $(subst ., ,$(KERNELRELEASE))),4)
-	always := $(dtbo-y)
-else
-	always-y := $(dtbo-y)
-endif
-
 ifeq ($(wildcard /boot/firmware/config.txt),)
     BOOT_CONFIG := /boot/config.txt
 else
@@ -25,24 +12,18 @@ else
 endif
 
 all: tagtagtag-mixerd
-	make -C /usr/src/linux-headers-$(KERNELRELEASE) M=$(shell pwd) modules
+	$(MAKE) -C /lib/modules/$(KERNELRELEASE)/build M=$(shell pwd) modules
 
-# dtbo rule is no longer available
-ifeq ($(firstword $(subst ., ,$(KERNELRELEASE))),6)
 all: tagtagtag-sound.dtbo
 
-tagtagtag-sound.dtbo: tagtagtag-sound-overlay-patched.dts
-	dtc -I dts -O dtb -o $@ $<
-
-tagtagtag-sound-overlay-patched.dts: tagtagtag-sound-overlay.dts
-	sed -e "s|^#define EXTCON_JACK_LINE_OUT 23|/* #define EXTCON_JACK_LINE_OUT 23 */|" $< > $@
-endif
+tagtagtag-sound.dtbo: tagtagtag-sound-overlay.dts
+	dtc -@ -I dts -O dtb -o $@ $<
 
 clean:
-	make -C /usr/src/linux-headers-$(KERNELRELEASE) M=$(shell pwd) clean
+	$(MAKE) -C /lib/modules/$(KERNELRELEASE)/build M=$(shell pwd) clean
 	rm -f tagtagtag-mixerd tagtagtag-mixerd-test
 
-install: snd-soc-wm8960.ko snd-soc-max9759.ko snd-soc-volume-gpio.ko tagtagtag-sound.dtbo tagtagtag-mixerd
+install: snd-soc-wm8960.ko snd-soc-max9759.ko tagtagtag-sound.dtbo tagtagtag-mixerd
 	if test -e /lib/modules/$(KERNELRELEASE)/kernel/sound/soc/codecs/snd-soc-wm8960.ko.xz; then \
 	    echo "Disabling built-in wm8960 driver" ; \
 	    mv /lib/modules/$(KERNELRELEASE)/kernel/sound/soc/codecs/snd-soc-wm8960.ko.xz \
@@ -50,7 +31,6 @@ install: snd-soc-wm8960.ko snd-soc-max9759.ko snd-soc-volume-gpio.ko tagtagtag-s
 	fi
 	install -o root -m 644 snd-soc-wm8960.ko /lib/modules/$(KERNELRELEASE)/kernel/sound/soc/codecs/
 	install -o root -m 644 snd-soc-max9759.ko /lib/modules/$(KERNELRELEASE)/kernel/sound/soc/codecs/
-	install -o root -m 644 snd-soc-volume-gpio.ko /lib/modules/$(KERNELRELEASE)/kernel/sound/soc/codecs/
 	depmod -a $(KERNELRELEASE)
 	install -o root -m 644 tagtagtag-sound.dtbo /boot/overlays/
 	sed $(BOOT_CONFIG) -i -e "s/^#dtparam=i2c_arm=on/dtparam=i2c_arm=on/"
@@ -65,6 +45,7 @@ install: snd-soc-wm8960.ko snd-soc-max9759.ko snd-soc-volume-gpio.ko tagtagtag-s
 	test -e /var/lib/tagtagtag-sound/mixer.conf || install -o root -m 644 mixer.conf.default /var/lib/tagtagtag-sound/mixer.conf
 	install -o root -m 755 tagtagtag-mixerd /usr/local/sbin/tagtagtag-mixerd
 	install -o root -m 644 tagtagtag-mixerd.service /lib/systemd/system/tagtagtag-mixerd.service
+	install -D -o root -m 644 60-tagtagtag-volume.rules /usr/lib/udev/rules.d/60-tagtagtag-volume.rules
 	systemctl enable tagtagtag-mixerd
 
 tagtagtag-mixerd : tagtagtag-mixerd.c

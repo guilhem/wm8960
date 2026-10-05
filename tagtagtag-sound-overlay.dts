@@ -1,9 +1,6 @@
 /dts-v1/;
 /plugin/;
 
-/* dt-bindings/extcon/connectors.h */
-#define EXTCON_JACK_LINE_OUT 23
-
 / {
     compatible = "brcm,bcm2708";
 
@@ -84,14 +81,24 @@
     fragment@5 {
         target-path="/";
         __overlay__ {
-            volumegpio: volume-button {
-                compatible = "linux,volume-gpio";
-                volume-gpios = <&gpio 27 0 &gpio 22 0>;
+            volume-button {
+                compatible = "gpio-keys";
+                label = "tagtagtag-volume";
 
                 // Declare a single pinctrl state (referencing the one declared above) and name it
                 // default, so it is activated automatically.
                 pinctrl-names = "default";
                 pinctrl-0 = <&gpio_physical_volume_1_pin &gpio_physical_volume_2_pin>;
+                volume-1 {
+                    linux,code = <0x100>; // BTN_0
+                    gpios = <&gpio 27 0>;
+                    debounce-interval = <10>;
+                };
+                volume-2 {
+                    linux,code = <0x101>; // BTN_1
+                    gpios = <&gpio 22 0>;
+                    debounce-interval = <10>;
+                };
             };
         };
     };
@@ -124,7 +131,7 @@
                 "RINPUT1", "Onboard Right Microphone",
                 "LINPUT1", "External Microphone",
                 "LINPUT2", "External Microphone";
-            simple-audio-card,aux-devs = <&max9759 &volumegpio>;
+            simple-audio-card,aux-devs = <&max9759>;
             simple-audio-card,hp-det-gpio = <&gpio 25 0>;
             pinctrl-names = "default";
             pinctrl-0 = <&gpio_line_out_detect_pin>;

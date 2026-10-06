@@ -104,7 +104,7 @@
     };
     fragment@6 {
         target = <&sound>;
-        wm8960_card: __overlay__ {
+        __overlay__ {
             compatible = "simple-audio-card";
             simple-audio-card,format = "i2s";
             simple-audio-card,name = "tagtagtag-sound"; 
@@ -146,6 +146,6 @@
         };
     };
     __overrides__ {
-        alsaname = <&wm8960_card>,"simple-audio-card,name";
+        alsaname = <&sound>,"simple-audio-card,name";
     };
 };

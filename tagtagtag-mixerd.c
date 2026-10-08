@@ -359,6 +359,9 @@ void set_volumes(int daemon, snd_hctl_t *hctl, struct config* conf, int jack, in
             playback_volume = 0;
         } else if (buttons[0] == 1 && buttons[1] == 0) {
             playback_volume = conf->headphone_high;
+        } else {
+            do_log(daemon, conf->debug, "Unexpected button values");
+            return;
         }
     } else if (buttons[0] == 0 && buttons[1] == 0) {
         speaker_volume = 0;
@@ -613,18 +616,18 @@ static void test_volume_input(void) {
 }
 
 static void test_volume_mapping(struct config *conf) {
-    const int states[][2] = {{0, 0}, {0, 1}, {1, 0}, {1, 1}};
+    const int states[][2] = {{0, 0}, {0, 1}, {1, 0}, {1, 1}, {-1, 0}, {0, -1}, {2, 0}, {0, 2}};
     const int speaker[] = {0, conf->tag_speaker_high, conf->tag_speaker_low};
     const int headphone[] = {conf->tagtag_speaker_low, 0, conf->tagtag_speaker_high};
     const int playback[] = {conf->headphone_low, 0, conf->headphone_high};
     for (int mode = LINEOUT_MODE_LINEOUT; mode <= LINEOUT_MODE_HEADPHONE; mode++) {
         conf->lineout_mode = mode;
         for (int jack = 0; jack <= 1; jack++) {
-            for (int state = 0; state < 4; state++) {
+            for (unsigned int state = 0; state < sizeof(states) / sizeof(states[0]); state++) {
                 int buttons[2] = {states[state][0], states[state][1]};
                 test_writes = 0;
                 set_volumes(0, NULL, conf, jack, buttons);
-                if (state == 3) {
+                if (state >= 3) {
                     assert(test_writes == 0);
                 } else if (jack && mode == LINEOUT_MODE_HEADPHONE) {
                     assert(test_writes > 0);

@@ -35,7 +35,7 @@
 #define DEFAULT_LINEOUT_MODE            LINEOUT_MODE_LINEOUT
 #define DEFAULT_MICROPHONE_ENABLED      1
 #define DEFAULT_INPUT1_BASE             3
-#define DEFAULT_CAPTURE_BASE            90
+#define DEFAULT_CAPTURE_BASE            39
 #define PID_FILE_PATH "/run/tagtagtag-mixerd.pid"
 #define VOLUME_INPUT_PATH "/dev/input/tagtagtag-volume"
 #define KEY_BITS (8 * sizeof(unsigned long))
@@ -290,12 +290,16 @@ typedef enum ctl_elem_value_type {
 
 #ifdef TEST
 static int test_volumes[3];
+static int test_playback_switch;
+static int test_capture_volume;
 static int test_writes;
 
 static void set_ctl_elem_value(snd_hctl_t *hctl, const char *name, ctl_elem_value_type val_type, int val) {
     if (!strcmp(name, "Speaker Playback Volume")) test_volumes[0] = val;
     if (!strcmp(name, "Headphone Playback Volume")) test_volumes[1] = val;
     if (!strcmp(name, "Playback Volume")) test_volumes[2] = val;
+    if (!strcmp(name, "Playback Switch")) test_playback_switch = val;
+    if (!strcmp(name, "Capture Volume")) test_capture_volume = val;
     test_writes++;
 }
 #else
@@ -359,6 +363,9 @@ void set_volumes(int daemon, snd_hctl_t *hctl, struct config* conf, int jack, in
             playback_volume = 0;
         } else if (buttons[0] == 1 && buttons[1] == 0) {
             playback_volume = conf->headphone_high;
+        } else {
+            do_log(daemon, conf->debug, "Unexpected button values");
+            return;
         }
     } else if (buttons[0] == 0 && buttons[1] == 0) {
         speaker_volume = 0;
@@ -389,11 +396,15 @@ void set_volumes(int daemon, snd_hctl_t *hctl, struct config* conf, int jack, in
     set_ctl_elem_value(hctl, "Capture Switch", dual_bool, conf->microphone_enabled);
     set_ctl_elem_value(hctl, "Left Input Boost Mixer LINPUT1 Volume", single_integer, conf->input1_base);
     set_ctl_elem_value(hctl, "Right Input Boost Mixer RINPUT1 Volume", single_integer, conf->input1_base);
-    set_ctl_elem_value(hctl, "Capture Volume", dual_integer, conf->capture_base);
+    // Existing configurations may request a gain outside the codec's 0-63 range.
+    int capture_volume = conf->capture_base >= 0 && conf->capture_base <= 63
+        ? conf->capture_base : DEFAULT_CAPTURE_BASE;
+    set_ctl_elem_value(hctl, "Capture Volume", dual_integer, capture_volume);
 
     // Switches
     set_ctl_elem_value(hctl, "Left Output Mixer PCM Playback Switch", single_bool, 1);
     set_ctl_elem_value(hctl, "Right Output Mixer PCM Playback Switch", single_bool, 1);
+    set_ctl_elem_value(hctl, "Playback Switch", single_bool, 1);
     set_ctl_elem_value(hctl, "Left Input Mixer Boost Switch", single_bool, 1);
     set_ctl_elem_value(hctl, "Right Input Mixer Boost Switch", single_bool, 1);
 }
@@ -613,18 +624,20 @@ static void test_volume_input(void) {
 }
 
 static void test_volume_mapping(struct config *conf) {
-    const int states[][2] = {{0, 0}, {0, 1}, {1, 0}, {1, 1}};
+    const int states[][2] = {{0, 0}, {0, 1}, {1, 0}, {1, 1}, {-1, 0}, {0, -1}, {2, 0}, {0, 2}};
     const int speaker[] = {0, conf->tag_speaker_high, conf->tag_speaker_low};
     const int headphone[] = {conf->tagtag_speaker_low, 0, conf->tagtag_speaker_high};
     const int playback[] = {conf->headphone_low, 0, conf->headphone_high};
     for (int mode = LINEOUT_MODE_LINEOUT; mode <= LINEOUT_MODE_HEADPHONE; mode++) {
         conf->lineout_mode = mode;
         for (int jack = 0; jack <= 1; jack++) {
-            for (int state = 0; state < 4; state++) {
+            for (unsigned int state = 0; state < sizeof(states) / sizeof(states[0]); state++) {
                 int buttons[2] = {states[state][0], states[state][1]};
                 test_writes = 0;
+                test_playback_switch = -1;
                 set_volumes(0, NULL, conf, jack, buttons);
-                if (state == 3) {
+                if (state < 3) assert(test_playback_switch == 1);
+                if (state >= 3) {
                     assert(test_writes == 0);
                 } else if (jack && mode == LINEOUT_MODE_HEADPHONE) {
                     assert(test_writes > 0);
@@ -638,6 +651,18 @@ static void test_volume_mapping(struct config *conf) {
                 }
             }
         }
+    }
+}
+
+static void test_capture_gain(struct config *conf) {
+    const int values[] = {-1, 0, 39, 63, 64, 90};
+    const int expected[] = {39, 0, 39, 63, 39, 39};
+    int buttons[2] = {1, 0};
+    for (unsigned int i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
+        conf->capture_base = values[i];
+        test_capture_volume = -1;
+        set_volumes(0, NULL, conf, 0, buttons);
+        assert(test_capture_volume == expected[i]);
     }
 }
 
@@ -672,6 +697,7 @@ int main(int argc, char** argv) {
 
     test_volume_input();
     test_volume_mapping(&default_conf);
+    test_capture_gain(&default_conf);
 
     return 0;
 }

@@ -99,7 +99,12 @@ static int speaker_mute_put(struct snd_kcontrol *kcontrol,
 	struct snd_soc_component *c = snd_soc_kcontrol_component(kcontrol);
 	struct max9759 *priv = snd_soc_component_get_drvdata(c);
 
-	priv->is_mute = !ucontrol->value.integer.value[0];
+	bool is_mute = !ucontrol->value.integer.value[0];
+
+	if (priv->is_mute == is_mute)
+		return 0;
+
+	priv->is_mute = is_mute;
 
 	gpiod_set_value_cansleep(priv->gpiod_mute, priv->is_mute);
 

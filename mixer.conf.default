@@ -20,4 +20,4 @@ lineout-mode=lineout
 ; Do not set headphone mode on tag (V1), as it would mute speakers (hardware behaves as if jack is always plugged).
 microphone-enabled=true
 input1-base=3
-capture-base=90
+capture-base=39
